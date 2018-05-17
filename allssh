@@ -1,0 +1,714 @@
+#!/usr/bin/env perl
+# vim: ft=perl ts=2 sts=2 sw=2
+#
+# Execute shell commands via ssh in parallel on multiple hosts.
+#
+use 5.010;
+use strict;
+use warnings;
+use version;
+use Fcntl;
+use Getopt::Long qw(:config posix_default bundling);
+use POSIX ();
+use Term::ANSIColor qw(:constants);
+use Time::HiRes qw(gettimeofday);
+use List::Util ();
+
+use constant USAGE =><<USAGE ;
+usage:  allssh [opts] <host_spec> [command]
+
+options:
+  -h --help           output usage message
+  -v --version        output version
+  -d --dry-run        echo ssh commands without executing them
+  -n --number         run command on N randomly-selected hosts
+                        (0 = run command on all hosts; default: 0)
+     --[no-]dedup     remove duplicate hosts from expanded list (default)
+     --[no-]times     output timestamp and how long it took to run on each host
+     --[no-]wait      wait for all hosts before displaying results (default)
+  -t --timeout        max number of seconds to wait for command to finish
+                        (0 = wait indefinitely; default: 0)
+  -s --sort           output sorted results
+                        host: sort by host name (default)
+                        user: sort by order given in command line or config
+  -e --exit-value     include command's exit value in output
+                        never: never include exit value
+                        auto: include it when it is non-zero (default)
+                        always: always include it
+  -p --separator      output a separator between host results
+                        never: never output separator
+                        auto: output when multi-line results (default)
+                        always: always output separator
+  -c --color          use ANSI color in output
+                        never: do not output terminal color codes
+                        auto: use color if writing to a terminal (default)
+                        always: output terminal color codes
+  -o --output         write output to named file instead of terminal
+  -u --user           specify a different user name
+  -q --quiet          don't output header
+     --add-host-keys  connect to host even if ssh key is not already known
+USAGE
+
+$| = 1;
+
+our $VERSION = version->declare("v3.0.0");
+our $ME = (split m#/#, $0)[-1];
+our %BOOL_ON  = map { $_ => 1 } qw(true  yes on  always T t Y y 1);
+our %BOOL_OFF = map { $_ => 1 } qw(false no  off never  F f N n 0);
+our $COLUMNS = $ENV{COLUMNS} || 80;
+our $TIMED_OUT = 0;
+our %HOSTS = ();
+our %GROUPS = ();
+our ($CS, $CE) = ("", "");
+our %O = (); # command-line options
+our %C = (   # program config
+  add_host_keys => 0,
+  color         => undef,
+  dedup         => 1,
+  exit_val      => undef,
+  number        => 0,
+  output        => undef,
+  quiet         => 0,
+  separator     => undef,
+  sort          => 'host',
+  timeout       => undef,
+  times         => 0,
+  user          => undef,
+  wait          => 1,
+);
+
+#==============================================================================
+# SUBROUTINES
+#==============================================================================
+
+sub Fatal
+{
+  print STDERR "$ME: @_\n";
+  exit 1;
+}
+
+sub GetTernaryOption
+{
+  my $val = shift;
+  my $rv = undef;
+
+  $val = lc $val;
+  if ($BOOL_ON{$val}) {
+    $rv = 1;
+  }
+  elsif ($BOOL_OFF{$val}) {
+    $rv = 0;
+  }
+  elsif ($val eq 'auto') {
+    $rv = undef;
+  }
+  else {
+    die "$ME: invalid option value -- $val\n"
+  }
+
+  return $rv;
+}
+
+# compare hosts names based first on base name then on node number
+# e.g. bar2i, foo10i, foo1i, bar1i, foo5i -> bar1i, bar2i, foo1i, foo5i, foo10i
+sub CmpHostNames
+{
+  my ($a, $b) = @_ == 2 ? @_ : ($a, $b);
+  my ($h1, $h2) = ($a, $b);
+
+  # $a = foo10i -> $h1 = foo{N}i, $n1 = 10
+  my $n1 = $h1 =~ s/(\d+)/{N}/ ? $1 : 0;
+  my $n2 = $h2 =~ s/(\d+)/{N}/ ? $1 : 0;
+
+  return $h1 ne $h2 ? $a cmp $b : $n1 <=> $n2;
+}
+
+sub Ping
+{
+  my @hosts = @_;
+
+  my $ping_exe;
+  if (-x "/bin/ping") {
+    $ping_exe = "/bin/ping";
+  }
+  elsif (-x "/usr/bin/ping") {
+    $ping_exe = "/usr/bin/ping";
+  }
+  else {
+    die "$0: ping executable not found\n";
+  }
+
+  # Prevent accidental fork-bombs!
+  die "$0: too many hosts -- @hosts\n" if (@hosts > 32);
+
+  my %pings = ();
+  my $idx = 0;
+  foreach my $host (@hosts) {
+    my $pid = fork();
+    if ($pid == 0) {
+      close(STDIN);
+      close(STDOUT);
+      close(STDERR);
+      chdir('/');
+      exec($ping_exe, '-c', 1, '-W', 1, $host) or exit(1);
+    }
+    else {
+      $pings{$pid} = { host => $host, idx => $idx++ };
+    }
+  }
+
+  while (%pings) {
+    my $pid = wait;
+    my $ping = delete $pings{$pid};
+    $hosts[$ping->{idx}] = undef if ($? != 0);
+  }
+
+  return grep { defined } @hosts;
+}
+
+sub ExpandHostRange
+{
+  my ($prefix, $range, $suffix) = @_;
+  my @hosts = ();
+
+  return ( $prefix ) unless ($range);
+
+  foreach (split /,/, $range) {
+    my ($first, $last, $width);
+    if (/(\d+)(?:-(\d+))?/) {
+      ($first, $last) = ($1, $2 || $1);
+      $width = length $first;
+      if ($width > length $last) {
+        $last = substr($first, 0, $width - length $last) . $last;
+      }
+    }
+    else {
+      Fatal("no host number found -- $_");
+    }
+
+    for (my $n = $first; $n <= $last; ++$n) {
+      push @hosts, sprintf("%s%0${width}d%s", $prefix, $n, $suffix);
+    }
+  }
+
+  return @hosts;
+}
+
+sub LoadRcFile
+{
+  my $rc_file = $ENV{ALLSSHRC} // "$ENV{HOME}/.allsshrc";
+
+  return unless (-e $rc_file);
+
+  my $group = '';
+  my ($host, $attrs);
+
+  open(my $fh, '<', $rc_file) or Fatal("unable to open $rc_file -- $!");
+  while (defined($_ = <$fh>)) {
+    next if (/^\s*(?:#|$)/);
+    chomp;
+
+    if (/^\s*\[(\w+)\]\s*$/) {
+      $group = uc $1;
+    }
+    elsif (/^\s*(@?[-.\w]+)\s*(?:\:\s*([\w\s]+))?$/) {
+      if ($group eq '') { Fatal("not in a named group") }
+
+      $GROUPS{$group} ||= { _order => [] };
+      if (substr($1, 0, 1) eq '@') {
+        my $g = uc substr($1, 1);
+        my $o = delete $GROUPS{$group}->{_order};
+        if (not $GROUPS{$g}) {
+          Fatal("undefined group in $rc_file -- [$.] $_")
+        }
+        push @$o, @{ $GROUPS{$g}->{_order} };
+        $GROUPS{$group} = { %{ $GROUPS{$group} }, %{ $GROUPS{$g} } };
+        $GROUPS{$group}->{_order} = $o;
+      }
+      else {
+        ($host, $attrs) = (lc($1), uc($2 // ''));
+        $GROUPS{$group}->{$host} = { map { $_ => 1 } (split ' ', $attrs) };
+        push @{ $GROUPS{$group}->{_order} }, $host;
+      }
+    }
+    else {
+      Fatal("invalid line in $rc_file -- [$.] $_");
+    }
+
+    next;
+  }
+
+  return;
+}
+
+sub ExpandGroup
+{
+  my ($group) = @_;
+
+  if (not exists $GROUPS{$group}) {
+    return undef;
+  }
+
+  return @{ $GROUPS{$group}->{_order} };
+}
+
+sub ExpandHostGroup
+{
+  my ($group, $subset) = @_;
+  my @hosts = ();
+
+  LoadRcFile();
+
+  my @members = ExpandGroup($group);
+  if (@members && not defined $members[0]) {
+    warn "$0: no such group -- $group\n";
+  }
+  else {
+    if ($subset =~ /^UP$/i) {
+      @members = Ping(@members);
+      if (@members == 0) {
+        warn "$ME: no hosts pingable in group -- $group\n";
+      }
+    }
+    elsif ($subset !~ /^ALL$/i) {
+      die "$0: invalid subset -- \U$subset\n";
+    }
+    push @hosts, @members;
+  }
+
+  return @hosts;
+}
+
+sub ExpandHostSpec
+{
+  my ($hosts) = @_;
+  my @hosts = ();
+
+  # split hosts args on a comma followed by a non-digit character
+  # e.g. foo1,3,5-7i,bar2  -->  foo1,3,5-7i  bar2
+  #
+  foreach my $host (split /,(?=\D)/, $hosts) {
+    if ($host =~ /^@/) {
+      if ($host =~ /^@(\w+)(?::(\w+))?$/) {
+        # named group and optional subset
+        #
+        my ($group, $subset) = ($1, $2 // 'ALL');
+        push @hosts, ExpandHostGroup($group, $subset);
+      }
+      else {
+        Fatal("invalid named group and/or subset -- $host")
+      }
+    }
+    elsif ($host =~ /^(\D+)(?:([\d,-]+)(?:(\D+))?)?/) {
+      # host list or range
+      # e.g. foo1,3,5-7i  -->  foo1i foo3i foo5i foo6i foo7i
+      #
+      my ($prefix, $range, $suffix) = ($1, $2 // '', $3 // '');
+      push @hosts, ExpandHostRange($prefix, $range, $suffix);
+    }
+    else {
+      Fatal("host name not in expected format -- $host")
+    }
+  }
+
+  if ($C{dedup}) {
+    my (%seen, @uniq);
+    foreach (@hosts) {
+      push(@uniq, $_) unless ($seen{$_});
+      $seen{$_} = 1;
+    }
+    @hosts = @uniq;
+  }
+
+  foreach (@hosts) {
+    ++$HOSTS{$_};
+  }
+
+  unless ($C{sort} eq 'user') {
+    @hosts = sort CmpHostNames @hosts;
+  }
+
+  return @hosts;
+}
+
+sub RandomHosts
+{
+  my ($hosts, $n) = @_;
+  my @shuffled = ( List::Util::shuffle @$hosts );
+  my @hosts = ();
+
+  while ($n--) {
+    push @hosts, shift(@shuffled);
+  }
+
+  return @hosts;
+}
+
+sub Print
+{
+  my ($fmt, $job) = @_;
+
+  my $host = $job->{host};
+  if (not $job->{out}->[0]) {
+    $job->{out}->[0] = "-- NO OUTPUT --\n";
+  }
+
+  my $label = sprintf "${CS}%-$fmt->{nm_len}s${CE}", $host;
+  if ($C{exit_val} || ((not defined $C{exit_val}) and $fmt->{ev_len})) {
+    if ( $job->{ev} || $C{exit_val}) {
+      $label .= sprintf " (%$fmt->{ev_len}d)", $job->{ev};
+    }
+    else {
+      $label .= sprintf "  %$fmt->{ev_len}s ", "";
+    }
+  }
+
+  if ($C{times}) {
+    $label .= sprintf " [%$fmt->{tm_len}.1fs]", $job->{elapsed};
+  }
+
+  if ($C{separator} || ((not defined $C{separator}) and $fmt->{multiline})) {
+    my $l = Length($label) + 8;
+    print "-=< $label >=-" . ("-" x ($COLUMNS - $l)) . "\n";
+    map { printf "%s", $_ } @{$job->{out}};
+  }
+  else {
+    map { printf "%s : %s", $label, $_ } @{$job->{out}};
+  }
+
+  return;
+}
+
+sub Length
+{
+  my $str = shift;
+  $str =~ s/\e.+?m//g;
+  $str =~ s/[^[:print:]]//g;
+  return length $str;
+}
+
+sub TransformCommand
+{
+  my ($host, $command) = @_;
+
+  # TODO add other transformations as needed
+  $command =~ s/{}/$host/g;
+
+  return $command;
+}
+
+sub SshCommand
+{
+  my ($host, $command) = @_;
+
+  my $user = $C{user} ? "$C{user}@" : '';
+  my @command = qw( ssh -anTx -o BatchMode=yes
+                              -o PreferredAuthentications=publickey
+                              -o PasswordAuthentication=no );
+  push @command, qw(-o StrictHostKeyChecking=no) if ($C{add_host_keys});
+  push @command, "$user$host", TransformCommand($host, $command);
+
+  return \@command;
+}
+
+my $fake_pid = -1;
+my %out_files = ();
+sub SshInBackground
+{
+  my ($host, $cmd) = @_;
+  my %info = ();
+
+  my ($output, $index) = (undef, 1);
+  if ($C{output}) {
+    $output = $C{output} . ".$host";
+    if ($HOSTS{$host} > 1) {
+      $index = ++$out_files{$host};
+      $output .= ".$out_files{$host}";
+    }
+  }
+
+  if ($O{dry_run}) {
+    %info = (
+      pid   => $fake_pid--,
+      out   => [ join(' ', @$cmd) . ($output ? " &> $output" : "") . "\n" ],
+      idx   => $index,
+      start => scalar(gettimeofday())
+    );
+
+    return \%info;
+  }
+
+  my $pid = $C{output} ? fork() : open($output, "-|");
+  if (not defined $pid) {
+    Fatal("unable to fork -- $!");
+  }
+  elsif ($pid) {
+    # parent
+    %info = ( pid => $pid, idx => $index, start => scalar(gettimeofday()) );
+    if (ref $output) {
+      my $flags = 0;
+      fcntl($output, F_GETFL, $flags);
+      $flags |= O_NONBLOCK;
+      fcntl($output, F_SETFL, $flags);
+
+      $info{fh} = $output;
+    }
+    else {
+      $info{out} = [ "-- SEE $output --\n" ];
+    }
+  }
+  else {
+    # child
+    if ($C{output}) {
+      open(STDOUT, "> $output") or Fatal("unable to open file $output -- $!");
+    }
+    POSIX::dup2(fileno(STDOUT), fileno(STDERR));
+    exec(@$cmd) or Fatal("unable to exec -- $!");
+  }
+
+  return \%info;
+}
+
+sub ParallelExec
+{
+  my ($command, @hosts) = @_;
+
+  my %ssh_jobs = ();
+  foreach my $host (@hosts) {
+    my $cmd_vec = SshCommand($host, $command);
+    my $cmd_info = SshInBackground($host, $cmd_vec);
+    $cmd_info->{host} = $host;
+
+    $ssh_jobs{$cmd_info->{pid}} = $cmd_info;
+  }
+
+  return \%ssh_jobs;
+}
+
+#==============================================================================
+# MAIN
+#==============================================================================
+
+GetOptions(\%O, "help|h", "dry_run|dry-run|d", "wait!", "separator|p=s",
+                "exit_value|exit-value|e=s", "dedup!", "times!", "timeout|t=i",
+                "add_host_keys|add-host-keys", "color|c=s", "sort|s=s",
+                "times!", "timeout=i", "output|o=s", "user|u=s", "number|n=i",
+                "quiet|q", "version|v")
+  or exit(1);
+
+if ($O{version}) {
+  print "$VERSION\n";
+  exit 0;
+}
+elsif ($O{help}) {
+  print USAGE;
+  exit 0;
+}
+
+# normalize flags
+#
+$C{color}     = GetTernaryOption($O{color})      if defined $O{color};
+$C{separator} = GetTernaryOption($O{separator})  if defined $O{separator};
+$C{exit_val}  = GetTernaryOption($O{exit_value}) if defined $O{exit_value};
+$C{dedup}     = $O{dedup}                        if defined $O{dedup};
+$C{wait}      = $O{wait}                         if defined $O{wait};
+$C{times}     = $O{times}                        if defined $O{times};
+$C{output}    = $O{output}                       if defined $O{output};
+$C{timeout}   = $O{timeout}                      if defined $O{timeout};
+$C{user}      = $O{user}                         if defined $O{user};
+$C{number}    = $O{number}                       if defined $O{number};
+$C{quiet}     = $O{quiet}                        if defined $O{quiet};
+$C{add_host_keys} = $O{add_host_keys}            if defined $O{add_host_keys};
+
+if (defined $O{sort}) {
+  $C{sort} = $O{sort};
+  if ($C{sort} !~ /^(host|user)$/) {
+    Fatal("invalid sort option -- $C{sort}");
+  }
+}
+
+if (!$C{wait} && $O{sort}) {
+  Fatal("--no-wait and --sort don't make sense together");
+}
+
+if ($O{timeout} && $C{timeout} < 1) {
+  Fatal("--timeout value must be 1 second or more");
+}
+
+if ($O{number}) {
+  if ($C{number} < 1) {
+    Fatal("--number value must be 1 host or more");
+  }
+  $C{dedup} = 1;
+}
+
+# generate host list
+#
+my $hosts = shift @ARGV;
+unless ($hosts) {
+  Fatal("no hosts specified");
+}
+
+my @hosts = ExpandHostSpec($hosts);
+unless (@hosts) {
+  Fatal("could not determine host list");
+}
+
+if ($C{number}) {
+  if ($C{number} > @hosts) {
+    Fatal("--number value is greater than number of unique hosts");
+  }
+  else {
+    @hosts = RandomHosts(\@hosts, $C{number});
+  }
+}
+
+# set colors, if any
+#
+if (not defined $C{color}) {
+  ($CS, $CE) = (BOLD, RESET) if (-t STDOUT);
+}
+elsif ($C{color}) {
+  ($CS, $CE) = (BOLD, RESET);
+}
+
+# print header (or just the host list)
+#
+my $command = join(" ", @ARGV);
+
+if (not $C{quiet}) {
+  print "${CS}Hosts:${CE} ", join(" ", @hosts), "\n";
+  print "${CS}User:${CE} ", $C{user}, "\n"                    if ($C{user});
+  print "${CS}Timestamp:${CE} ", scalar(localtime), "\n"      if ($C{times});
+  print "${CS}Command:${CE} ", $command || "<NONE>", "\n";
+}
+elsif (not $command) {
+  print join(" ", @hosts), "\n"
+}
+exit(0) if (not $command);
+
+print "\n" if (not $C{quiet});
+
+my $pending_jobs = ParallelExec($command, @hosts);
+
+# wait for each command to complete or timeout
+#
+my %out_fmt = ( multiline => 0, nm_len => 0, ev_len => 0, tm_len => 0 );
+my %done_jobs = ();
+my $exit_val = 0;
+
+if ($C{timeout}) {
+  $SIG{ALRM} = sub { die "TIMEOUT\n" };
+  alarm($C{timeout});
+}
+
+while (%$pending_jobs) {
+  my ($pid, $ev, $sig, $core) = (0, 0, 0, 0);
+
+  if ($O{dry_run}) {
+    $pid = (keys %$pending_jobs)[0];
+  }
+  elsif ($TIMED_OUT) {
+    $pid  = (keys %$pending_jobs)[0];
+    $ev   = -1;
+    kill 'INT', $pid;
+    $exit_val ||= -1;
+  }
+  else {
+    $pid  = eval { wait };
+    if ($@ =~ /TIMEOUT/) {
+      $TIMED_OUT = 1;
+      redo;
+    }
+
+    $ev   = $? >> 8;
+    $sig  = $? & 0x7f;
+    $core = $? & 0x80 ? 1 : 0;
+  }
+
+  my $job = delete $pending_jobs->{$pid};
+  $job->{end}  = gettimeofday();
+  $job->{ev}   = $ev;
+  $job->{sig}  = $sig;
+  $job->{core} = $core;
+
+  if ($job->{fh}) {
+    my $fh = $job->{fh};
+    $job->{out} = [ <$fh> ];
+  }
+
+  if ($TIMED_OUT) {
+    push @{ $job->{out} }, "-- TIMEOUT --\n";
+  }
+
+  $out_fmt{multiline} = 1
+    if (scalar @{ $job->{out} } > 1);
+
+  $out_fmt{nm_len} = length $job->{host}
+    if ($out_fmt{nm_len} < length $job->{host});
+
+  if ($job->{ev} != 0) {
+    $exit_val ||= $job->{ev};
+    $out_fmt{ev_len} = length $job->{ev}
+      if ($out_fmt{ev_len} < length $job->{ev});
+  }
+
+  $job->{elapsed}
+    = sprintf "%.1f", $job->{end} - $job->{start};
+  $out_fmt{tm_len} = length $job->{elapsed}
+      if ($out_fmt{tm_len} < length $job->{elapsed});
+
+  if ($C{wait}) {
+    $done_jobs{$pid} = $job;
+  }
+  else {
+    Print(\%out_fmt, $job);
+  }
+}
+
+alarm(0);
+
+exit($exit_val) unless ($C{wait});
+
+# output the results
+#
+my %host2pids = ();
+while (my ($pid, $job) = each %done_jobs) {
+  $host2pids{ $job->{host} } ||= [];
+  push @{ $host2pids{ $job->{host} } }, $pid;
+}
+
+my %printed = ();
+foreach my $host (@hosts) {
+  next if ($printed{$host});
+
+  my @pids = sort { $done_jobs{$a}->{idx} <=> $done_jobs{$b}->{idx} }
+                  @{ $host2pids{$host} };
+  foreach my $pid (@pids) {
+    Print(\%out_fmt, $done_jobs{$pid});
+  }
+
+  $printed{$host} = 1;
+}
+
+exit($exit_val);
+
+__END__
+RC File Format
+
+[GROUP1]
+hostname1
+hostname2 : ATTR1
+hostname3 : ATTR1 ATTR2
+...
+
+[GROUP2]
+...
+
+[GROUP3]
+...
+@GROUP1
+@GROUP2
+...
+
+# eof
