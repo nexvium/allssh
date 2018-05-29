@@ -40,23 +40,75 @@ Care should be taken if the command to execute remotely has characters that are 
 
 Any `{}` string in the command will be replaced with the remote hostname.
 
-Examples
---------
+### Examples
 
 Shutdown the hosts `alpha`, `beta`, `gamma`, `delta`:
 
-    $ allssh alpha,beta,gamma,delta shutdown -h now
+```
+$ allssh -uroot alpha,beta,gamma,delta /sbin/shutdown -h now
+Hosts: alpha beta delta gamma
+User: root
+Command: /sbin/shutdown -h now
 
-Report the number of GiB of RAM installed on 99 hosts named `node??i`:
+alpha : -- NO OUTPUT --
+beta  : -- NO OUTPUT --
+delta : -- NO OUTPUT --
+gamma : -- NO OUTPUT --
+```
 
-    $ allssh node01-99i 'awk "/MemTotal/ {print int(\$2/1024/1024+1)}" < /proc/meminfo'
+Report the number of GiB of RAM installed on 10 hosts named `node??i`:
 
-Synchronize time on the current host and all hosts that are online in a host group named `CLUSTER`:
+```
+$ allssh node01-10i 'awk "/MemTotal/ {print int(\$2/1024/1024+1)}" < /proc/meminfo'
+Hosts: node01i node02i node03i node04i node05i node06i node07i node08i node09i node10i
+Command: awk "/MemTotal/ {print int(\$2/1024/1024+1)}" < /proc/meminfo
 
-    $ allssh localhost,@CLUSTER:UP 'service ntpd stop ; service ntpdate start ; service ntpd start'
+node01i : 4
+node02i : 4
+node03i : 4
+node04i : 8
+node05i : 8
+node06i : 8
+node07i : 16
+node08i : 16
+node09i : 32
+node10i : 32
+```
 
-Options
--------
+Check if the current host and all hosts that are online in a host group named `CLUSTER` have their time synchronized:
+
+```
+$ allssh --sort=user localhost,@CLUSTER:UP
+Hosts: localhost alpha delta
+Command: timedatectl status
+
+-=< localhost >=------------------------------------------------------------------------------------
+                      Local time: Mon 2018-05-28 18:37:15 PDT
+                  Universal time: Tue 2018-05-29 01:37:15 UTC
+                        RTC time: Tue 2018-05-29 01:37:15
+                       Time zone: America/Los_Angeles (PDT, -0700)
+       System clock synchronized: no
+systemd-timesyncd.service active: yes
+                 RTC in local TZ: no
+-=< alpha     >=------------------------------------------------------------------------------------
+                      Local time: Mon 2018-05-28 18:37:15 PDT
+                  Universal time: Tue 2018-05-29 01:37:15 UTC
+                        RTC time: Tue 2018-05-29 01:37:15
+                       Time zone: America/Los_Angeles (PDT, -0700)
+       System clock synchronized: no
+systemd-timesyncd.service active: yes
+                 RTC in local TZ: no
+-=< delta     >=------------------------------------------------------------------------------------
+                      Local time: Mon 2018-05-28 18:37:15 PDT
+                  Universal time: Tue 2018-05-29 01:37:15 UTC
+                        RTC time: Tue 2018-05-29 01:37:15
+                       Time zone: America/Los_Angeles (PDT, -0700)
+       System clock synchronized: no
+systemd-timesyncd.service active: yes
+                 RTC in local TZ: no
+```
+
+### Options
 
 The following options are supported.
 
@@ -147,18 +199,20 @@ A host group consists of line containing the group name surrounded by brackets, 
 
 For example, the file below defines three host groups.
 
-    [X86]
-    alpha
-    beta
+```
+[X86]
+alpha
+beta
 
-    [ARM]
-    gamma
-    delta
+[ARM]
+gamma
+delta
 
-    [ALL]
-    admin
-    @X86
-    @ARM
+[CLUSTER]
+admin
+@X86
+@ARM
+```
 
 ### Disclaimer
 
