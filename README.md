@@ -78,7 +78,7 @@ node10i : 32
 Check if the current host and all hosts that are online in a host group named `CLUSTER` have their time synchronized:
 
 ```
-$ allssh --sort=user localhost,@CLUSTER:UP
+$ allssh --sort=user localhost,@CLUSTER:UP timedatectl status
 Hosts: localhost alpha delta
 Command: timedatectl status
 
