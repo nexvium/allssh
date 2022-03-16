@@ -26,6 +26,7 @@ options:
      --[no-]dedup     remove duplicate hosts from expanded list (default)
      --[no-]times     output timestamp and how long it took to run on each host
      --[no-]wait      wait for all hosts before displaying results (default)
+     --[no-]header    output header with hosts and command to be run (default)
   -t --timeout        max number of seconds to wait for command to finish
                         (0 = wait indefinitely; default: 0)
   -s --sort           output sorted results
@@ -43,15 +44,17 @@ options:
                         never: do not output terminal color codes
                         auto: use color if writing to a terminal (default)
                         always: output terminal color codes
+  -i --input          use named file as stdin for each host
   -o --output         write output to named file instead of terminal
   -u --user           specify a different user name
-  -q --quiet          don't output header
+  -q --quiet          run ssh with --quiet option
+     --ok             only output hosts where command succeeded
      --add-host-keys  connect to host even if ssh key is not already known
 USAGE
 
 $| = 1;
 
-our $VERSION = version->declare("v3.0.0");
+our $VERSION = version->declare("v3.2.0");
 our $ME = (split m#/#, $0)[-1];
 our %BOOL_ON  = map { $_ => 1 } qw(true  yes on  always T t Y y 1);
 our %BOOL_OFF = map { $_ => 1 } qw(false no  off never  F f N n 0);
@@ -59,14 +62,17 @@ our $COLUMNS = $ENV{COLUMNS} || 80;
 our $TIMED_OUT = 0;
 our %HOSTS = ();
 our %GROUPS = ();
-our ($CS, $CE) = ("", "");
+our ($CS, $CE, $C1, $C2) = ("", "", "", "");
 our %O = (); # command-line options
 our %C = (   # program config
   add_host_keys => 0,
   color         => undef,
   dedup         => 1,
   exit_val      => undef,
+  header        => 1,
+  input         => undef,
   number        => 0,
+  ok            => 0,
   output        => undef,
   quiet         => 0,
   separator     => undef,
@@ -208,34 +214,89 @@ sub LoadRcFile
     next if (/^\s*(?:#|$)/);
     chomp;
 
-    if (/^\s*\[(\w+)\]\s*$/) {
+    if (/^\s*\[(\w+)(?:,([\w,]+))?\]\s*$/) {
       $group = uc $1;
+      if (not GroupNameOK($group)) {
+        Fatal("group names must begin with a letter in $rc_file -- [$.] $_")
+      }
+      $GROUPS{$group} ||= { _order => [] };
+      foreach my $alias (split /,/, uc($2 // '')) {
+        if ($alias ne '') {
+          if (not GroupNameOK($alias)) {
+            Fatal("group names must begin with a letter in $rc_file -- [$.] $_")
+          }
+          $GROUPS{$alias} = $GROUPS{$group};
+        }
+      }
     }
     elsif (/^\s*(@?[-.\w]+)\s*(?:\:\s*([\w\s]+))?$/) {
       if ($group eq '') { Fatal("not in a named group") }
 
-      $GROUPS{$group} ||= { _order => [] };
-      if (substr($1, 0, 1) eq '@') {
-        my $g = uc substr($1, 1);
-        my $o = delete $GROUPS{$group}->{_order};
-        if (not $GROUPS{$g}) {
-          Fatal("undefined group in $rc_file -- [$.] $_")
-        }
-        push @$o, @{ $GROUPS{$g}->{_order} };
-        $GROUPS{$group} = { %{ $GROUPS{$group} }, %{ $GROUPS{$g} } };
-        $GROUPS{$group}->{_order} = $o;
+      ($host, $attrs) = (lc($1), uc($2 // ''));
+      if (ExtractGroupName($host) and $attrs) {
+        Fatal("attributes on groups not allowed in $rc_file -- [$.] $_");
       }
-      else {
-        ($host, $attrs) = (lc($1), uc($2 // ''));
-        $GROUPS{$group}->{$host} = { map { $_ => 1 } (split ' ', $attrs) };
-        push @{ $GROUPS{$group}->{_order} }, $host;
-      }
+
+      $GROUPS{$group}->{$host} = { map { $_ => 1 } (split ' ', $attrs) };
+      push @{ $GROUPS{$group}->{_order} }, $host;
     }
     else {
       Fatal("invalid line in $rc_file -- [$.] $_");
     }
+  }
 
-    next;
+  foreach my $group (keys %GROUPS) {
+    FlattenGroup($group);
+  }
+
+  return;
+}
+
+sub GroupNameOK
+{
+  return $_[0] =~ /^[A-Z]/;
+}
+
+sub ExtractGroupName
+{
+  return substr($_[0], 0, 1) eq '@' ? uc(substr $_[0], 1) : '';
+}
+
+sub FlattenGroup
+{
+  my ($name) = @_;
+
+  my $current = $GROUPS{$name};
+  my $prev = { $name => 1 };
+  my $i = 0;
+  while (defined $current->{_order}->[$i]) {
+    my $e = $current->{_order}->[$i];
+    my $g = ExtractGroupName($e);
+    if (not $g) {
+      $i++;
+      next;
+    }
+
+    if ($prev->{$g}) {
+      Fatal("circular reference resolving $e in group $name");
+    }
+
+    my $r = $GROUPS{$g};
+    if (not $g) {
+      Fatal("undefined group $name");
+    }
+
+    delete $current->{"@\L$g"};
+    splice @{$current->{_order}}, $i, 1;
+
+    my $j = $i;
+    foreach my $o (@{$r->{_order}}) {
+        if (not $current->{$o}) {
+          splice @{$current->{_order}}, $j, 0, $o;
+          $current->{$o} = $r->{$o};
+          $j++;
+        }
+    }
   }
 
   return;
@@ -271,7 +332,10 @@ sub ExpandHostGroup
       }
     }
     elsif ($subset !~ /^ALL$/i) {
-      die "$0: invalid subset -- \U$subset\n";
+      @members = grep { $GROUPS{$group}->{$_}->{$subset} } @members;
+      if (@members == 0) {
+        die "$0: invalid subset -- \U$subset\n";
+      }
     }
     push @hosts, @members;
   }
@@ -348,6 +412,8 @@ sub Print
 {
   my ($fmt, $job) = @_;
 
+  return if ($job->{ev} != 0 && $C{ok});
+
   my $host = $job->{host};
   if (not $job->{out}->[0]) {
     $job->{out}->[0] = "-- NO OUTPUT --\n";
@@ -356,7 +422,7 @@ sub Print
   my $label = sprintf "${CS}%-$fmt->{nm_len}s${CE}", $host;
   if ($C{exit_val} || ((not defined $C{exit_val}) and $fmt->{ev_len})) {
     if ( $job->{ev} || $C{exit_val}) {
-      $label .= sprintf " (%$fmt->{ev_len}d)", $job->{ev};
+      $label .= sprintf "${C1} (%$fmt->{ev_len}d)", $job->{ev};
     }
     else {
       $label .= sprintf "  %$fmt->{ev_len}s ", "";
@@ -369,12 +435,14 @@ sub Print
 
   if ($C{separator} || ((not defined $C{separator}) and $fmt->{multiline})) {
     my $l = Length($label) + 8;
-    print "-=< $label >=-" . ("-" x ($COLUMNS - $l)) . "\n";
+    print "${C1}-=< $label${C1} >=-" . ("-" x ($COLUMNS - $l)) . "\n";
     map { printf "%s", $_ } @{$job->{out}};
   }
   else {
-    map { printf "%s : %s", $label, $_ } @{$job->{out}};
+    map { printf "${C1}%s${C1} : %s${CE}", $label, $_ } @{$job->{out}};
   }
+
+  ($C1, $C2) = ($C2, $C1);
 
   return;
 }
@@ -402,10 +470,12 @@ sub SshCommand
   my ($host, $command) = @_;
 
   my $user = $C{user} ? "$C{user}@" : '';
-  my @command = qw( ssh -anTx -o BatchMode=yes
-                              -o PreferredAuthentications=publickey
-                              -o PasswordAuthentication=no );
+  my @command = qw( ssh -aTx -o BatchMode=yes
+                             -o PreferredAuthentications=publickey
+                             -o PasswordAuthentication=no );
   push @command, qw(-o StrictHostKeyChecking=no) if ($C{add_host_keys});
+  push @command, qw(-q) if ($C{quiet});
+  push @command, qw(-n) if (not $C{input});
   push @command, "$user$host", TransformCommand($host, $command);
 
   return \@command;
@@ -459,8 +529,11 @@ sub SshInBackground
   }
   else {
     # child
+    if ($C{input}) {
+      open(STDIN, "< $C{input}") or Fatal("unable to open input file $C{input} -- $!");
+    }
     if ($C{output}) {
-      open(STDOUT, "> $output") or Fatal("unable to open file $output -- $!");
+      open(STDOUT, "> $output") or Fatal("unable to open output file $output -- $!");
     }
     POSIX::dup2(fileno(STDOUT), fileno(STDERR));
     exec(@$cmd) or Fatal("unable to exec -- $!");
@@ -493,7 +566,7 @@ GetOptions(\%O, "help|h", "dry_run|dry-run|d", "wait!", "separator|p=s",
                 "exit_value|exit-value|e=s", "dedup!", "times!", "timeout|t=i",
                 "add_host_keys|add-host-keys", "color|c=s", "sort|s=s",
                 "times!", "timeout=i", "output|o=s", "user|u=s", "number|n=i",
-                "quiet|q", "version|v")
+                "input|i=s", "header!", "ok", "quiet|q", "version|v")
   or exit(1);
 
 if ($O{version}) {
@@ -511,13 +584,16 @@ $C{color}     = GetTernaryOption($O{color})      if defined $O{color};
 $C{separator} = GetTernaryOption($O{separator})  if defined $O{separator};
 $C{exit_val}  = GetTernaryOption($O{exit_value}) if defined $O{exit_value};
 $C{dedup}     = $O{dedup}                        if defined $O{dedup};
+$C{header}    = $O{header}                       if defined $O{header};
 $C{wait}      = $O{wait}                         if defined $O{wait};
 $C{times}     = $O{times}                        if defined $O{times};
 $C{output}    = $O{output}                       if defined $O{output};
+$C{input}     = $O{input}                        if defined $O{input};
 $C{timeout}   = $O{timeout}                      if defined $O{timeout};
 $C{user}      = $O{user}                         if defined $O{user};
 $C{number}    = $O{number}                       if defined $O{number};
 $C{quiet}     = $O{quiet}                        if defined $O{quiet};
+$C{ok}        = $O{ok}                           if defined $O{ok};
 $C{add_host_keys} = $O{add_host_keys}            if defined $O{add_host_keys};
 
 if (defined $O{sort}) {
@@ -540,6 +616,10 @@ if ($O{number}) {
     Fatal("--number value must be 1 host or more");
   }
   $C{dedup} = 1;
+}
+
+if ($C{input} && ($C{input} eq "-" || $C{input} eq "/dev/stdin")) {
+  Fatal("--input must be a file");
 }
 
 # generate host list
@@ -565,29 +645,30 @@ if ($C{number}) {
 
 # set colors, if any
 #
-if (not defined $C{color}) {
-  ($CS, $CE) = (BOLD, RESET) if (-t STDOUT);
-}
-elsif ($C{color}) {
+if ($C{color} || (-t STDOUT && not defined $C{color})) {
   ($CS, $CE) = (BOLD, RESET);
+  ($C1, $C2) = ("\e[36m", "\e[94m");
+  #($C1, $C2) = (BRIGHT_WHITE, WHITE);
 }
 
 # print header (or just the host list)
 #
 my $command = join(" ", @ARGV);
 
-if (not $C{quiet}) {
-  print "${CS}Hosts:${CE} ", join(" ", @hosts), "\n";
-  print "${CS}User:${CE} ", $C{user}, "\n"                    if ($C{user});
-  print "${CS}Timestamp:${CE} ", scalar(localtime), "\n"      if ($C{times});
-  print "${CS}Command:${CE} ", $command || "<NONE>", "\n";
+if ($C{header} && (-t STDOUT or $command)) {
+  print "${C1}${CS}Hosts:${CE} ", join(" ", @hosts), "\n";
+  print "${C1}${CS}User:${CE} ", $C{user}, "\n"               if ($C{user});
+  print "${C1}${CS}Timestamp:${CE} ", scalar(localtime), "\n" if ($C{times});
+  print "${C1}${CS}Command:${CE} ", $command, "\n"            if ($command);
 }
 elsif (not $command) {
   print join(" ", @hosts), "\n"
 }
 exit(0) if (not $command);
 
-print "\n" if (not $C{quiet});
+print "\n" if ($C{header});
+
+($C1, $C2) = ($C2, $C1);
 
 my $pending_jobs = ParallelExec($command, @hosts);
 
@@ -700,15 +781,19 @@ RC File Format
 hostname1
 hostname2 : ATTR1
 hostname3 : ATTR1 ATTR2
+@GROUP4
 ...
 
 [GROUP2]
 ...
 
-[GROUP3]
+[GROUP3,ALIAS1,...]
 ...
 @GROUP1
 @GROUP2
+...
+
+[GROUP4]
 ...
 
 # eof
