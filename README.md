@@ -20,7 +20,10 @@ The host_spec must be a single argument with no white space. The spec may contai
 * A comma followed by one or more letters denotes the end of one hostname and start of another.
 * A comma followed by one or more digits denotes a host number to replace the number in the previous hostname.
 * A hyphen preceded and followed by one or more digits indicates a number range to be expanded to generate multiple hostnames.
-* An at sign followed by one or more letters indicates a named host group defined in the dot rc file. A group name my be followed by ':UP' to expand the group to only the hosts that are up (responsive to pings).
+* An at sign followed by one or more letters indicates a named host group defined in the dot rc file.
+  * A group name may be followed by `:UP` to expand to only the hosts that are up (responsive to pings).
+  * A group name may be followed by `:<ATTR>` to expand to only the hosts with that attribute.
+  * Only one attribute may be specified for a group.
 
 For example, the spec `foo1,3,5-7i,@BAR` expands to the hosts `foo1i foo3i foo5i foo6i foo7i bar1 bar2` (assuming the group BAR is composed of hosts bar1 and bar2).
 
@@ -118,7 +121,7 @@ The following options are supported.
 
 * `-v` `--version`
 
-  Output the version number, currently v3.0.0, and exit.
+  Output the version number, currently v3.2.0, and exit.
 
 * `-d` `--dry-run`
 
@@ -126,7 +129,7 @@ The following options are supported.
 
 * `-q` `--quiet`
 
-  Don't output the header including the expanded host list and command line.
+  Run ssh with the `--quiet` option.
 
 * `-nN` `--number=N`
 
@@ -143,6 +146,10 @@ The following options are supported.
 * `--[no-]times`
 
   Report, or not, how long it took to run command on each hosts. Default is to not display.
+
+* `--[no-]header`
+
+  Output, or not, the header containing the expanded host list and command line.
 
 * `-tN` `--timeout=N`
 
@@ -179,13 +186,21 @@ The following options are supported.
     * `auto`: use color only when writing to a terminal
     * `always`: use color even if not writing to terminal
 
+* `-iPATH` `--input=PATH`
+
+  Use file as the stdin in for each host. It must be a seekable file.
+
 * `-oPATH` `--output=PATH`
 
-  Write command output to files instead of standard out. A dot and hostname will be appended to PATH generate the pathname for each file.
+  Write command output to files instead of stdout. A dot and hostname will be appended to PATH generate the pathname for each file.
 
 * `-uUSERNAME` `--user=USERNAME`
 
   Specify username to use for ssh. Default is to not specify any username (i.e. use the caller's username or the one specified by the ssh config).
+
+* `--ok`
+
+  Only show output from hosts where command succeeded (exited with zero).
 
 * `--add-host-keys`
 
@@ -193,25 +208,25 @@ The following options are supported.
 
 ### RC file
 
-If the file `~/.allssrc` (or a pathname in the environment variable `$ALLSSHRC`) exists, it will be used to look for host group definitions.
+If the file `~/.allsshrc` (or a pathname in the environment variable `$ALLSSHRC`) exists, it will be used to look for host group definitions.
 
-A host group consists of line containing the group name surrounded by brackets, followed by the hostnames or other group names (prefixed by `@`), one per line. The end of the group is indicated by EOF or the start of a new group.
+A host group starts with a line containing the group name (and optional aliases) surrounded by brackets. Each group member follows in its own line, optionally followed by a colon and list of user-defined attributes. Instead of a hostname, a group name (prefixed by a `@`) may be specified to include all members of that group. The end of the group is indicated by EOF or the start of a new group.
 
 For example, the file below defines three host groups.
 
 ```
-[X86]
-alpha
-beta
-
-[ARM]
-gamma
-delta
-
 [CLUSTER]
 admin
 @X86
 @ARM
+
+[X86,DESKTOP]
+alpha : CLIENT CENTOS7
+beta  : CLIENT CENTOS8
+
+[ARM,MOBILE]
+gamma : CLIENT ANDROID
+delta : CLIENT IPHONE
 ```
 
 ### Disclaimer
