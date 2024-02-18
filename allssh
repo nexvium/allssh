@@ -53,8 +53,9 @@ options:
 USAGE
 
 $| = 1;
+$0 = (split m#/#, $0)[-1];
 
-our $VERSION = version->declare("v3.2.0");
+our $VERSION = version->declare("v3.2.1");
 our $ME = (split m#/#, $0)[-1];
 our %BOOL_ON  = map { $_ => 1 } qw(true  yes on  always T t Y y 1);
 our %BOOL_OFF = map { $_ => 1 } qw(false no  off never  F f N n 0);
@@ -62,6 +63,7 @@ our $COLUMNS = $ENV{COLUMNS} || 80;
 our $TIMED_OUT = 0;
 our %HOSTS = ();
 our %GROUPS = ();
+our $IPv4_RE = qr/(?:\d{1,3}\.){3}\d{1,3}/;
 our ($CS, $CE, $C1, $C2) = ("", "", "", "");
 our %O = (); # command-line options
 our %C = (   # program config
@@ -348,10 +350,11 @@ sub ExpandHostSpec
   my ($hosts) = @_;
   my @hosts = ();
 
-  # split hosts args on a comma followed by a non-digit character
+  # split hosts args on a comma followed by either
+  # a non-digit character or an ipv4 address
   # e.g. foo1,3,5-7i,bar2  -->  foo1,3,5-7i  bar2
   #
-  foreach my $host (split /,(?=\D)/, $hosts) {
+  foreach my $host (split /,(?=\D|$IPv4_RE)/, $hosts) {
     if ($host =~ /^@/) {
       if ($host =~ /^@(\w+)(?::(\w+))?$/) {
         # named group and optional subset
@@ -369,6 +372,9 @@ sub ExpandHostSpec
       #
       my ($prefix, $range, $suffix) = ($1, $2 // '', $3 // '');
       push @hosts, ExpandHostRange($prefix, $range, $suffix);
+    }
+    elsif ($host =~ /^$IPv4_RE$/) {
+      push @hosts, $host;
     }
     else {
       Fatal("host name not in expected format -- $host")
@@ -417,6 +423,9 @@ sub Print
   my $host = $job->{host};
   if (not $job->{out}->[0]) {
     $job->{out}->[0] = "-- NO OUTPUT --\n";
+  }
+  elsif ($job->{out}->[-1] !~ /\n$/) {
+    $job->{out}->[0] .= "-- NO NEWLINE --\n";
   }
 
   my $label = sprintf "${CS}%-$fmt->{nm_len}s${CE}", $host;

@@ -17,15 +17,15 @@ Options must be specified before the host spec, otherwise they are considered pa
 
 The host_spec must be a single argument with no white space. The spec may contain commas and hyphens to specify multiple hosts. The following rules are used for host spec expansion:
 
-* A comma followed by one or more letters denotes the end of one hostname and start of another.
-* A comma followed by one or more digits denotes a host number to replace the number in the previous hostname.
+* A comma followed by one or more letters or an IPv4 address denotes the end of one hostname and start of another.
+* A comma followed by one or more digits that are not an IPv4 address denotes a host number to replace the number in the previous hostname.
 * A hyphen preceded and followed by one or more digits indicates a number range to be expanded to generate multiple hostnames.
 * An at sign followed by one or more letters indicates a named host group defined in the dot rc file.
   * A group name may be followed by `:UP` to expand to only the hosts that are up (responsive to pings).
   * A group name may be followed by `:<ATTR>` to expand to only the hosts with that attribute.
   * Only one attribute may be specified for a group.
 
-For example, the spec `foo1,3,5-7i,@BAR` expands to the hosts `foo1i foo3i foo5i foo6i foo7i bar1 bar2` (assuming the group BAR is composed of hosts bar1 and bar2).
+For example, the spec `foo1,3,5-7i,192.168.0.1,@BAR` expands to the hosts `foo1i foo3i foo5i foo6i foo7i 192.168.0.1 bar1 bar2` (assuming the group BAR is composed of hosts bar1 and bar2).
 
 Ranges are intended to be both compact and intuitive. The number of digits to the left of the hyphen determines the minimum number of digits in the expansion. The number of digits to the right of the hyphen determines the number of least-significant digits that are changed during expansion.
 
@@ -35,7 +35,7 @@ Ranges must be in ascending order.
 
 IP address ranges are not currently supported.
 
-Host must be configured to allow logging in using ssh keys. There will be no prompts for passwords.
+Host must be configured to allow login using ssh keys. There will be no prompts for passwords.
 
 ##### Command
 
