@@ -574,8 +574,8 @@ sub ParallelExec
 GetOptions(\%O, "help|h", "dry_run|dry-run|d", "wait!", "separator|p=s",
                 "exit_value|exit-value|e=s", "dedup!", "times!", "timeout|t=i",
                 "add_host_keys|add-host-keys", "color|c=s", "sort|s=s",
-                "times!", "timeout=i", "output|o=s", "user|u=s", "number|n=i",
-                "input|i=s", "header!", "ok", "quiet|q", "version|v")
+                "output|o=s", "user|u=s", "number|n=i", "input|i=s", "header!",
+                "ok", "quiet|q", "version|v")
   or exit(1);
 
 if ($O{version}) {
