@@ -33,7 +33,7 @@ For example, the spec `foo8-11` expands to `foo8 foo9 foo10 foo11`; `foo08-11` e
 
 Ranges must be in ascending order.
 
-IP address ranges are not currently supported.
+IP address ranges and IPv6 addresses are not currently supported.
 
 Host must be configured to allow login using ssh keys. There will be no prompts for passwords.
 
@@ -121,7 +121,7 @@ The following options are supported.
 
 * `-v` `--version`
 
-  Output the version number, currently v3.2.0, and exit.
+  Output the version number and exit.
 
 * `-d` `--dry-run`
 
@@ -145,7 +145,7 @@ The following options are supported.
 
 * `--[no-]times`
 
-  Report, or not, how long it took to run command on each hosts. Default is to not display.
+  Report, or not, how long it took to run the command on each host. Default is to not display.
 
 * `--[no-]header`
 
@@ -192,7 +192,7 @@ The following options are supported.
 
 * `-oPATH` `--output=PATH`
 
-  Write command output to files instead of stdout. A dot and hostname will be appended to PATH generate the pathname for each file.
+  Write command output to files instead of stdout. A dot and hostname will be appended to PATH to generate the pathname for each file.
 
 * `-uUSERNAME` `--user=USERNAME`
 
@@ -233,6 +233,4 @@ delta : CLIENT IPHONE
 
 Copyright (C) 2007 by Javier Alvarado.
 
-This program was written for personal use by the author. Permission is hereby granted to study, use, copy, and/or modify for non-commercial use.
-
-***THE SOFTWARE IS PROVIDED "AS IS" AND WITHOUT WARRANTY OF ANY KIND. THE AUTHOR IS IN NO WAY LIABLE FOR ANY DAMAGES OR LOSS OF DATA.***
+This program is released under the MIT License. See LICENSE.md for details.
