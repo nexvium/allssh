@@ -345,36 +345,71 @@ sub ExpandHostGroup
   return @hosts;
 }
 
+sub SetHostLabels
+{
+  my ($type, $label, $hosts) = @_;
+
+  foreach (@$hosts) {
+    if ($type eq '+') {
+      $HOSTS{$_}->{label} = "$_ [$label]";
+    }
+    elsif ($type eq '=') {
+      $HOSTS{$_}->{label} = "[$label]";
+    }
+    else {
+      $HOSTS{$_}->{label} = $_;
+    }
+  }
+
+  return;
+}
+
 sub ExpandHostSpec
 {
-  my ($hosts) = @_;
+  my ($host_spec) = @_;
   my @hosts = ();
 
   # split hosts args on a comma followed by either
   # a non-digit character or an ipv4 address
   # e.g. foo1,3,5-7i,bar2  -->  foo1,3,5-7i  bar2
   #
-  foreach my $host (split /,(?=\D|$IPv4_RE)/, $hosts) {
+  foreach my $host (split /,(?=\D|$IPv4_RE)/, $host_spec) {
+    # extract host label if any is present
+    # e.g. foo+a1  -->  $host = 'foo', $type = '+', $label = 'a1'
+    my ($type, $label) = ("", "");
+    my $label_re = qr/([=+])(\w+)/;
+    if ($host =~ $label_re) {
+      ($type, $label) = ($1, $2);
+      $host =~ s/$label_re//;
+    }
+
     if ($host =~ /^@/) {
       if ($host =~ /^@(\w+)(?::(\w+))?$/) {
         # named group and optional subset
         #
         my ($group, $subset) = ($1, $2 // 'ALL');
-        push @hosts, ExpandHostGroup($group, $subset);
+        my @expanded = ExpandHostGroup($group, $subset);
+        push @hosts, @expanded;
+        SetHostLabels($type, $label, \@expanded);
+
+        next;
       }
-      else {
-        Fatal("invalid named group and/or subset -- $host")
-      }
+
+      Fatal("invalid named group and/or subset -- $host")
     }
-    elsif ($host =~ /^(\D+)(?:([\d,-]+)(?:(\D+))?)?/) {
+
+    if ($host =~ /^(\D+)(?:([\d,-]+)(?:(\D+))?)?/) {
       # host list or range
       # e.g. foo1,3,5-7i  -->  foo1i foo3i foo5i foo6i foo7i
       #
       my ($prefix, $range, $suffix) = ($1, $2 // '', $3 // '');
-      push @hosts, ExpandHostRange($prefix, $range, $suffix);
+      my @expanded = ExpandHostRange($prefix, $range, $suffix);
+      push @hosts, @expanded;
+      SetHostLabels($type, $label, \@expanded);
     }
     elsif ($host =~ /^$IPv4_RE$/) {
       push @hosts, $host;
+      SetHostLabels($type, $label, [ $host ]);
     }
     else {
       Fatal("host name not in expected format -- $host")
@@ -391,7 +426,7 @@ sub ExpandHostSpec
   }
 
   foreach (@hosts) {
-    ++$HOSTS{$_};
+    $HOSTS{$_}->{count}++;
   }
 
   unless ($C{sort} eq 'user') {
@@ -420,7 +455,7 @@ sub Print
 
   return if ($job->{ev} != 0 && $C{ok});
 
-  my $host = $job->{host};
+  my $host = $HOSTS{$job->{host}}->{label};
   if (not $job->{out}->[0]) {
     $job->{out}->[0] = "-- NO OUTPUT --\n";
   }
@@ -734,8 +769,8 @@ while (%$pending_jobs) {
   $out_fmt{multiline} = 1
     if (scalar @{ $job->{out} } > 1);
 
-  $out_fmt{nm_len} = length $job->{host}
-    if ($out_fmt{nm_len} < length $job->{host});
+  $out_fmt{nm_len} = length $HOSTS{$job->{host}}->{label}
+    if ($out_fmt{nm_len} < length $HOSTS{$job->{host}}->{label});
 
   if ($job->{ev} != 0) {
     $exit_val ||= $job->{ev};
