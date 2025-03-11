@@ -4,6 +4,7 @@ allssh is a small program to run a shell command on multiple hosts over ssh.  Th
 
 The program is implemented in a single file with (AFAIK) no dependencies other than perl. There is no need to install or configure anything to use it.
 
+This documents version 3.3.0.
 
 ### Usage
 
@@ -34,6 +35,8 @@ For example, the spec `foo8-11` expands to `foo8 foo9 foo10 foo11`; `foo08-11` e
 Ranges must be in ascending order.
 
 IP address ranges and IPv6 addresses are not currently supported.
+
+Host names or ranges may be followed by a plus or equal sign and a label to indicate that the label should be appended to (`+`) or replace (`=`) the hostname in the output. For example, `foo1i+CentOS7,foo3i+Alma9` will output the results from each host labeled as `foo1i [CentOS7]` and `foo3i [Alma9]`, and `@BAR=REDACTED` will output the results from all hosts labeled as `[REDACTED]`.
 
 Host must be configured to allow login using ssh keys. There will be no prompts for passwords.
 
@@ -127,6 +130,10 @@ The following options are supported.
 
   Output the ssh command that would be executed instead of running it.
 
+* `-r` `--reverse`
+
+  Output results in reverse order.
+
 * `-q` `--quiet`
 
   Run ssh with the `--quiet` option.
@@ -161,6 +168,7 @@ The following options are supported.
 
     * `host`: sort by hostname
     * `user`: output in order hosts are given in expanded host spec
+    * `time`: output in order commands completed
 
 * `-eMODE` `--exit-value=MODE`
 
