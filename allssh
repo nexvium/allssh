@@ -32,6 +32,7 @@ options:
   -s --sort           output sorted results
                         host: sort by host name (default)
                         user: sort by order given in command line or config
+                        time: sort by completion time
   -e --exit-value     include command's exit value in output
                         never: never include exit value
                         auto: include it when it is non-zero (default)
@@ -47,6 +48,7 @@ options:
   -i --input          use named file as stdin for each host
   -o --output         write output to named file instead of terminal
   -u --user           specify a different user name
+  -r --reverse        output results in reverse order
   -q --quiet          run ssh with --quiet option
      --ok             only output hosts where command succeeded
      --add-host-keys  connect to host even if ssh key is not already known
@@ -83,6 +85,7 @@ our %C = (   # program config
   times         => 0,
   user          => undef,
   wait          => 1,
+  reverse       => 0,
 );
 
 #==============================================================================
@@ -429,10 +432,6 @@ sub ExpandHostSpec
     $HOSTS{$_}->{count}++;
   }
 
-  unless ($C{sort} eq 'user') {
-    @hosts = sort CmpHostNames @hosts;
-  }
-
   return @hosts;
 }
 
@@ -610,7 +609,7 @@ GetOptions(\%O, "help|h", "dry_run|dry-run|d", "wait!", "separator|p=s",
                 "exit_value|exit-value|e=s", "dedup!", "times!", "timeout|t=i",
                 "add_host_keys|add-host-keys", "color|c=s", "sort|s=s",
                 "output|o=s", "user|u=s", "number|n=i", "input|i=s", "header!",
-                "ok", "quiet|q", "version|v")
+                "ok", "quiet|q", "reverse|r", "version|v")
   or exit(1);
 
 if ($O{version}) {
@@ -638,11 +637,12 @@ $C{user}      = $O{user}                         if defined $O{user};
 $C{number}    = $O{number}                       if defined $O{number};
 $C{quiet}     = $O{quiet}                        if defined $O{quiet};
 $C{ok}        = $O{ok}                           if defined $O{ok};
+$C{reverse}   = $O{reverse}                      if defined $O{reverse};
 $C{add_host_keys} = $O{add_host_keys}            if defined $O{add_host_keys};
 
 if (defined $O{sort}) {
   $C{sort} = $O{sort};
-  if ($C{sort} !~ /^(host|user)$/) {
+  if ($C{sort} !~ /^host|user|time$/) {
     Fatal("invalid sort option -- $C{sort}");
   }
 }
@@ -795,7 +795,7 @@ alarm(0);
 
 exit($exit_val) unless ($C{wait});
 
-# output the results
+# aggregate jobs per host
 #
 my %host2pids = ();
 while (my ($pid, $job) = each %done_jobs) {
@@ -803,17 +803,45 @@ while (my ($pid, $job) = each %done_jobs) {
   push @{ $host2pids{ $job->{host} } }, $pid;
 }
 
-my %printed = ();
-foreach my $host (@hosts) {
-  next if ($printed{$host});
+# place the hosts or jobs in the requested order
+#
+my @pids = ();
+if ($C{sort} eq 'host') {
+  @hosts = sort CmpHostNames @hosts;
+}
+elsif ($C{sort} eq 'time') {
+  @pids = sort { $done_jobs{$a}->{end} <=> $done_jobs{$b}->{end} }
+               keys %done_jobs;
+}
 
-  my @pids = sort { $done_jobs{$a}->{idx} <=> $done_jobs{$b}->{idx} }
-                  @{ $host2pids{$host} };
+# output the results
+#
+if (@pids) {
+  if ($C{reverse}) {
+    @pids = reverse @pids;
+  }
+
   foreach my $pid (@pids) {
     Print(\%out_fmt, $done_jobs{$pid});
   }
+}
+else {
+  if ($C{reverse}) {
+    @hosts = reverse @hosts;
+  }
 
-  $printed{$host} = 1;
+  my %printed = ();
+  foreach my $host (@hosts) {
+    next if ($printed{$host});
+
+    @pids = sort { $done_jobs{$a}->{idx} <=> $done_jobs{$b}->{idx} }
+                    @{ $host2pids{$host} };
+    foreach my $pid (@pids) {
+      Print(\%out_fmt, $done_jobs{$pid});
+    }
+
+    $printed{$host} = 1;
+  }
 }
 
 exit($exit_val);
